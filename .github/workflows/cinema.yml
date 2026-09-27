@@ -14,6 +14,7 @@ jobs:
         env:
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
         run: |
           python3 <<'PY'
           import urllib.request
@@ -21,142 +22,119 @@ jobs:
           import urllib.error
           import json
           import os
-          from datetime import datetime
+          from datetime import datetime, timezone
 
           TMDB = "https://api.themoviedb.org/3"
-          API_KEY = os.environ["TMDB_API_KEY"]
+          API_TOKEN = os.environ["TMDB_API_KEY"]
           WEBHOOK = os.environ["DISCORD_WEBHOOK"]
 
-          today = datetime.utcnow().strftime("%Y-%m-%d")
+          today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-          def get(url, params):
-              params["api_key"] = API_KEY
-              url += "?" + urllib.parse.urlencode(params)
+          def get(url, params=None):
+              if params is None:
+                  params = {}
+
+              if params:
+                  url += "?" + urllib.parse.urlencode(params)
 
               req = urllib.request.Request(
                   url,
-                  headers={"User-Agent": "FROST-CINEMA"}
+                  headers={
+                      "Authorization": f"Bearer {API_TOKEN}",
+                      "Accept": "application/json",
+                      "User-Agent": "FROST-CINEMA"
+                  }
               )
 
               try:
-                  with urllib.request.urlopen(req) as r:
-                      return json.loads(r.read().decode())
+                  with urllib.request.urlopen(req) as response:
+                      return json.loads(response.read().decode("utf-8"))
+
               except urllib.error.HTTPError as e:
                   body = e.read().decode("utf-8", errors="replace")
-                  print("TMDB ERROR:", e.code)
-                  print("TMDB RESPONSE:", body)
+                  print("TMDB ERROR:", e.code, body)
                   raise
 
           def post_discord(payload):
-              data = json.dumps(payload).encode()
+              data = json.dumps(payload).encode("utf-8")
 
               req = urllib.request.Request(
                   WEBHOOK,
                   data=data,
                   headers={
-                      "Content-Type": "application/json"
+                      "Content-Type": "application/json",
+                      "User-Agent": "FROST-CINEMA"
                   }
               )
 
-              with urllib.request.urlopen(req) as r:
-                  return r.read()
+              with urllib.request.urlopen(req) as response:
+                  return response.read()
 
           def find_trailer(videos):
-              for v in videos.get("results", []):
-                  if (
-                      v.get("site") == "YouTube"
-                      and v.get("type") == "Trailer"
-                      and v.get("official") is True
-                  ):
-                      return "https://www.youtube.com/watch?v=" + v["key"]
+              results = videos.get("results", [])
 
-              for v in videos.get("results", []):
+              for video in results:
                   if (
-                      v.get("site") == "YouTube"
-                      and v.get("type") == "Trailer"
+                      video.get("site") == "YouTube"
+                      and video.get("type") == "Trailer"
+                      and video.get("official") is True
                   ):
-                      return "https://www.youtube.com/watch?v=" + v["key"]
+                      return "https://www.youtube.com/watch?v=" + video["key"]
+
+              for video in results:
+                  if (
+                      video.get("site") == "YouTube"
+                      and video.get("type") == "Trailer"
+                  ):
+                      return "https://www.youtube.com/watch?v=" + video["key"]
 
               return None
 
-          def send_item(item, media_type):
+          def send_movie(movie):
+              movie_id = movie["id"]
 
-              if media_type == "movie":
-                  title = item.get("title", "Unknown")
-                  date = item.get("release_date", today)
-
-                  detail_url = f"{TMDB}/movie/{item['id']}"
-
-                  detail = get(
-                      detail_url,
-                      {
-                          "language": "en-US",
-                          "append_to_response": "videos"
-                      }
-                  )
-
-                  label = "🎬 MOVIE"
-
-              else:
-                  title = item.get("name", "Unknown")
-                  date = item.get("first_air_date", today)
-
-                  detail_url = f"{TMDB}/tv/{item['id']}"
-
-                  detail = get(
-                      detail_url,
-                      {
-                          "language": "en-US",
-                          "append_to_response": "videos"
-                      }
-                  )
-
-                  label = "📺 SERIES"
-
-              poster = item.get("poster_path")
-
-              poster_url = (
-                  "https://image.tmdb.org/t/p/w500" + poster
-                  if poster
-                  else None
+              details = get(
+                  f"{TMDB}/movie/{movie_id}",
+                  {
+                      "language": "en-US",
+                      "append_to_response": "videos"
+                  }
               )
+
+              title = movie.get("title", "Unknown")
+              release_date = movie.get("release_date") or today
+              rating = movie.get("vote_average", 0)
+              overview = movie.get("overview") or "No description available."
+
+              poster = movie.get("poster_path")
+
+              poster_url = None
+
+              if poster:
+                  poster_url = (
+                      "https://image.tmdb.org/t/p/w500" + poster
+                  )
 
               trailer = find_trailer(
-                  detail.get("videos", {})
+                  details.get("videos", {})
               )
 
-              if media_type == "movie":
-                  tmdb_url = (
-                      f"https://www.themoviedb.org/movie/{item['id']}"
-                  )
-              else:
-                  tmdb_url = (
-                      f"https://www.themoviedb.org/tv/{item['id']}"
-                  )
-
               embed = {
-                  "title": f"{label} • {title}",
-
-                  "description": (
-                      item.get("overview")
-                      or "No description available."
-                  ),
-
-                  "url": tmdb_url,
-
+                  "title": f"🎬 MOVIE • {title}",
+                  "description": overview,
+                  "url": f"https://www.themoviedb.org/movie/{movie_id}",
                   "fields": [
                       {
                           "name": "📅 Release Date",
-                          "value": date or "Unknown",
+                          "value": release_date,
                           "inline": True
                       },
                       {
                           "name": "⭐ Rating",
-                          "value": f"{item.get('vote_average', 0):.1f}/10",
+                          "value": f"{rating:.1f}/10",
                           "inline": True
                       }
                   ],
-
                   "footer": {
                       "text": "FROST CINEMA • Data from TMDB"
                   }
@@ -168,27 +146,95 @@ jobs:
                   }
 
               if trailer:
-                  embed["fields"].append(
-                      {
-                          "name": "▶️ Official Trailer",
-                          "value": f"[Watch Trailer]({trailer})",
-                          "inline": False
-                      }
-                  )
+                  embed["fields"].append({
+                      "name": "▶️ Official Trailer",
+                      "value": f"[Watch Trailer]({trailer})",
+                      "inline": False
+                  })
 
-              post_discord(
+              post_discord({
+                  "username": "FROST CINEMA",
+                  "embeds": [embed]
+              })
+
+              print("Movie sent:", title)
+
+          def send_tv(show):
+              show_id = show["id"]
+
+              details = get(
+                  f"{TMDB}/tv/{show_id}",
                   {
-                      "username": "FROST CINEMA",
-                      "embeds": [embed]
+                      "language": "en-US",
+                      "append_to_response": "videos"
                   }
               )
 
-              print("Sent:", title)
+              title = show.get("name", "Unknown")
+              release_date = show.get("first_air_date") or today
+              rating = show.get("vote_average", 0)
+              overview = show.get("overview") or "No description available."
 
+              poster = show.get("poster_path")
+
+              poster_url = None
+
+              if poster:
+                  poster_url = (
+                      "https://image.tmdb.org/t/p/w500" + poster
+                  )
+
+              trailer = find_trailer(
+                  details.get("videos", {})
+              )
+
+              embed = {
+                  "title": f"📺 SERIES • {title}",
+                  "description": overview,
+                  "url": f"https://www.themoviedb.org/tv/{show_id}",
+                  "fields": [
+                      {
+                          "name": "📅 First Air Date",
+                          "value": release_date,
+                          "inline": True
+                      },
+                      {
+                          "name": "⭐ Rating",
+                          "value": f"{rating:.1f}/10",
+                          "inline": True
+                      }
+                  ],
+                  "footer": {
+                      "text": "FROST CINEMA • Data from TMDB"
+                  }
+              }
+
+              if poster_url:
+                  embed["image"] = {
+                      "url": poster_url
+                  }
+
+              if trailer:
+                  embed["fields"].append({
+                      "name": "▶️ Official Trailer",
+                      "value": f"[Watch Trailer]({trailer})",
+                      "inline": False
+                  })
+
+              post_discord({
+                  "username": "FROST CINEMA",
+                  "embeds": [embed]
+              })
+
+              print("Series sent:", title)
+
+          print("================================")
+          print("FROST CINEMA")
           print("Checking releases for:", today)
+          print("================================")
 
           movies = get(
-              TMDB + "/discover/movie",
+              f"{TMDB}/discover/movie",
               {
                   "language": "en-US",
                   "include_adult": "false",
@@ -201,7 +247,7 @@ jobs:
           )
 
           shows = get(
-              TMDB + "/discover/tv",
+              f"{TMDB}/discover/tv",
               {
                   "language": "en-US",
                   "include_adult": "false",
@@ -213,24 +259,22 @@ jobs:
               }
           )
 
-          movie_errors = 0
-          tv_errors = 0
+          print("Movies found:", len(movies.get("results", [])))
+          print("Series found:", len(shows.get("results", [])))
 
           for movie in movies.get("results", []):
               try:
-                  send_item(movie, "movie")
+                  send_movie(movie)
               except Exception as e:
-                  movie_errors += 1
                   print("Movie error:", e)
 
           for show in shows.get("results", []):
               try:
-                  send_item(show, "tv")
+                  send_tv(show)
               except Exception as e:
-                  tv_errors += 1
                   print("TV error:", e)
 
-          print("Movie errors:", movie_errors)
-          print("TV errors:", tv_errors)
+          print("================================")
           print("FROST CINEMA finished.")
+          print("================================")
           PY
